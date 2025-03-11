@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
 """An OpenVINO worker class."""
 from typing import Any, Dict, List, Optional, Tuple
 
 import openvino as ov
 import torch
 import torch.distributed
+import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.attention import get_attn_backend
@@ -22,7 +24,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest, SequenceGroupMetadata
 from vllm.utils import bind_kv_cache
 from vllm.worker.openvino_model_runner import OpenVINOModelRunner
-from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
+from vllm.worker.worker_base import LoRANotSupportedWorkerBase, WorkerBase
 
 logger = init_logger(__name__)
 
@@ -201,7 +203,7 @@ class OpenVINOCacheEngine:
         return dtype_size * total
 
 
-class OpenVINOWorker(LoraNotSupportedWorkerBase):
+class OpenVINOWorker(LoRANotSupportedWorkerBase):
     """A worker class that executes the model on OpenVINO backend.
 
     Each worker is associated with a single OpenVINO device. The worker is
@@ -361,6 +363,9 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
         blocks_to_copy: List[Tuple[int, int]],
     ) -> None:
         self.cache_engine.copy(blocks_to_copy)  # type: ignore
+
+    def get_model(self) -> nn.Module:
+        return self.model_runner.get_model()
 
     @torch.inference_mode()
     def execute_model(
@@ -540,7 +545,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
                 "value. This may cause low performance due to "
                 "occupying the majority of available system "
                 "memory. Please consider decreasing "
-                "gpu_memory_utilization or explicitly setting"
+                "gpu_memory_utilization or explicitly setting "
                 "`VLLM_OPENVINO_KVCACHE_SPACE` (GB) environment "
                 "variable.", memory_utilization)
 

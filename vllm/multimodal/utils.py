@@ -1,32 +1,33 @@
-from functools import lru_cache
+# SPDX-License-Identifier: Apache-2.0
+
+from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, TypeVar, Union
 from urllib.parse import ParseResult, urlparse
 
 import numpy as np
 import numpy.typing as npt
+import torch
 from PIL import Image
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .audio import AudioMediaIO
 from .base import MediaIO
-from .image import ImageMediaIO
+from .image import ImageEmbeddingMediaIO, ImageMediaIO
 from .inputs import PlaceholderRange
 from .video import VideoMediaIO
 
 logger = init_logger(__name__)
 
-cached_get_tokenizer = lru_cache(get_tokenizer)
-
 _M = TypeVar("_M")
 
 if TYPE_CHECKING:
     from .hasher import MultiModalHashDict
-    from .inputs import MultiModalPlaceholderDict
+    from .inputs import MultiModalKwargs, MultiModalPlaceholderDict
 
 
 class MediaConnector:
@@ -244,6 +245,17 @@ class MediaConnector:
             video_io,
             fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
         )
+
+    def fetch_image_embedding(
+        self,
+        data: str,
+    ) -> torch.Tensor:
+        """
+        Load image embedding from a URL.
+        """
+        image_embedding_io = ImageEmbeddingMediaIO()
+
+        return image_embedding_io.load_base64("", data)
 
 
 global_media_connector = MediaConnector()
@@ -477,3 +489,39 @@ def merge_and_sort_multimodal_metadata(
         merged_hashes = None
 
     return sorted_modalities, merged_placeholders, merged_hashes
+
+
+def group_mm_inputs_by_modality(
+        mm_inputs: list["MultiModalKwargs"]) -> list[list["MultiModalKwargs"]]:
+    """Group consecutive MultiModalKwargs from mm_inputs with the same modality 
+    together into the same list for batching purpose. For MultiModalKwargs with 
+    multiple modalities, put them into their own list.
+
+    Args:
+        mm_inputs: List of MultiModalKwargs.
+
+    Returns:
+        list[list[MultiModalKwargs]]: List of list of MultiModalKwargs, each 
+        inner list contains consecutive MultiModalKwargs with same modality, or
+        one with multimodal modalities.
+    """
+    if not mm_inputs:
+        return []
+
+    def modality_group_func(mm_input: "MultiModalKwargs") -> Union[str, int]:
+        # If the input has multiple modalities, return a id as the unique key
+        # for the mm_input input.
+        if len(mm_input.modalities) > 1:
+            return id(mm_input)
+
+        elif len(mm_input.modalities) == 1:
+            return list(mm_input.modalities)[0]
+
+        # FIXME(Isotr0py): Modality of mm_input from legacy pipeline is empty,
+        # this is used to make InternVL with legacy pipeline still work with v1.
+        else:
+            return ""
+
+    return [
+        list(group) for _, group in groupby(mm_inputs, key=modality_group_func)
+    ]

@@ -1,7 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import os
 import socket
-from typing import AsyncIterator, Tuple
+from collections.abc import AsyncIterator
 from unittest.mock import patch
 
 import pytest
@@ -9,10 +11,10 @@ import torch
 from vllm_test_utils import monitor
 
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
-from vllm.utils import (FlexibleArgumentParser, PlaceholderModule,
-                        StoreBoolean, bind_kv_cache, deprecate_kwargs,
-                        get_open_port, memory_profiling, merge_async_iterators,
-                        supports_kw)
+from vllm.utils import (FlexibleArgumentParser, MemorySnapshot,
+                        PlaceholderModule, StoreBoolean, bind_kv_cache,
+                        deprecate_kwargs, get_open_port, memory_profiling,
+                        merge_async_iterators, supports_kw, swap_dict_values)
 
 from .utils import error_on_warning, fork_new_process_for_each_test
 
@@ -31,7 +33,7 @@ async def test_merge_async_iterators():
     iterators = [mock_async_iterator(i) for i in range(3)]
     merged_iterator = merge_async_iterators(*iterators)
 
-    async def stream_output(generator: AsyncIterator[Tuple[int, str]]):
+    async def stream_output(generator: AsyncIterator[tuple[int, str]]):
         async for idx, output in generator:
             print(f"idx: {idx}, output: {output}")
 
@@ -284,14 +286,13 @@ def test_memory_profiling():
     # 512 MiB allocation outside of this instance
     handle1 = lib.cudaMalloc(512 * 1024 * 1024)
 
-    baseline_memory_in_bytes = \
-        torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]
+    baseline_snapshot = MemorySnapshot()
 
     # load weights
 
     weights = torch.randn(128, 1024, 1024, device='cuda', dtype=torch.float32)
 
-    weights_memory_in_bytes = 128 * 1024 * 1024 * 4 # 512 MiB
+    weights_memory = 128 * 1024 * 1024 * 4 # 512 MiB
 
     def measure_current_non_torch():
         free, total = torch.cuda.mem_get_info()
@@ -300,8 +301,8 @@ def test_memory_profiling():
         current_non_torch = current_used - current_torch
         return current_non_torch
 
-    with memory_profiling(baseline_memory_in_bytes=baseline_memory_in_bytes,
-    weights_memory_in_bytes=weights_memory_in_bytes) as result, \
+    with memory_profiling(baseline_snapshot=baseline_snapshot,
+    weights_memory=weights_memory) as result, \
         monitor(measure_current_non_torch) as monitored_values:
         # make a memory spike, 1 GiB
         spike = torch.randn(256, 1024, 1024, device='cuda', dtype=torch.float32)
@@ -316,13 +317,12 @@ def test_memory_profiling():
     assert measured_diff == 256 * 1024 * 1024
 
     # Check that the memory usage is within 5% of the expected values
-    # 5% tolerance is caused by PyTorch caching allocator,
-    # we cannot control PyTorch's behavior of its internal buffers,
+    # 5% tolerance is caused by cuda runtime.
+    # we cannot control cuda runtime in the granularity of bytes,
     # which causes a small error (<10 MiB in practice)
-    non_torch_ratio = result.non_torch_increase_in_bytes / (256 * 1024 * 1024) # noqa
-    torch_peak_ratio = result.torch_peak_increase_in_bytes / (1024 * 1024 * 1024) # noqa
+    non_torch_ratio = result.non_torch_increase / (256 * 1024 * 1024) # noqa
     assert abs(non_torch_ratio - 1) <= 0.05
-    assert abs(torch_peak_ratio - 1) <= 0.05
+    assert result.torch_peak_increase == 1024 * 1024 * 1024
     del weights
     lib.cudaFree(handle1)
     lib.cudaFree(handle2)
@@ -449,3 +449,26 @@ def test_placeholder_module_error_handling():
     with build_ctx():
         # Test conflict with internal __module attribute
         _ = placeholder_attr.module
+
+
+@pytest.mark.parametrize(
+    "obj,key1,key2",
+    [
+        # Tests for both keys exist
+        ({1: "a", 2: "b"}, 1, 2),
+        # Tests for one key does not exist
+        ({1: "a", 2: "b"}, 1, 3),
+        # Tests for both keys do not exist
+        ({1: "a", 2: "b"}, 3, 4),
+    ])
+def test_swap_dict_values(obj, key1, key2):
+    original_obj = obj.copy()
+    swap_dict_values(obj, key1, key2)
+    if key1 in original_obj:
+        assert obj[key2] == original_obj[key1]
+    else:
+        assert key2 not in obj
+    if key2 in original_obj:
+        assert obj[key1] == original_obj[key2]
+    else:
+        assert key1 not in obj
